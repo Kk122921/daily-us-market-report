@@ -1,5 +1,6 @@
 import os
 import smtplib
+import time
 import requests
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
@@ -29,11 +30,7 @@ ALLOWED_DOMAINS = [
 ]
 
 KEYWORDS = """
-US stock market OR Nasdaq OR S&P 500 OR Dow Jones OR Federal Reserve OR FOMC OR Powell
-OR Treasury OR White House OR SEC OR DOJ OR Commerce Department
-OR CPI OR PPI OR jobs report OR unemployment OR GDP OR PMI OR ISM
-OR Nvidia OR Tesla OR Microsoft OR Meta OR Apple OR Amazon OR AMD OR Google OR AI chips
-OR bond yields OR dollar OR oil OR geopolitics OR sanctions OR export controls
+US stock market OR Nasdaq OR Federal Reserve OR Nvidia OR Tesla OR Microsoft OR AI chips
 """
 
 def domain_allowed(url):
@@ -41,19 +38,24 @@ def domain_allowed(url):
     return any(d in domain for d in ALLOWED_DOMAINS)
 
 def fetch_news():
-    query = f"({KEYWORDS})"
     url = "https://api.gdeltproject.org/api/v2/doc/doc"
 
     params = {
-        "query": query,
+        "query": KEYWORDS,
         "mode": "ArtList",
         "format": "json",
         "timespan": "24h",
-        "maxrecords": 75,
+        "maxrecords": 25,
         "sort": "HybridRel"
     }
 
+    time.sleep(3)
+
     r = requests.get(url, params=params, timeout=30)
+
+    if r.status_code == 429:
+        return []
+
     r.raise_for_status()
     data = r.json()
 
@@ -64,7 +66,6 @@ def fetch_news():
     for a in articles:
         title = a.get("title", "").strip()
         link = a.get("url", "").strip()
-        source = a.get("sourceCountry", "")
         domain = urlparse(link).netloc.lower().replace("www.", "")
         date = a.get("seendate", "")
 
@@ -77,23 +78,27 @@ def fetch_news():
         key = title.lower()[:90]
         if key in seen:
             continue
+
         seen.add(key)
 
         results.append({
             "title": title,
             "url": link,
             "domain": domain,
-            "date": date,
-            "source": source
+            "date": date
         })
 
-    return results[:30]
+    return results[:20]
 
 def build_news_text(news):
     if not news:
-        return "过去24小时未从指定权威来源抓取到足够新闻。"
+        return """
+过去24小时内，GDELT接口未能从指定权威来源稳定抓取到足够新闻。
+请在日报中明确说明“指定来源新闻不足”，不要编造新闻。
+"""
 
     lines = []
+
     for i, n in enumerate(news, 1):
         lines.append(
             f"{i}. 标题：{n['title']}\n"
@@ -101,6 +106,7 @@ def build_news_text(news):
             f"时间：{n['date']}\n"
             f"链接：{n['url']}\n"
         )
+
     return "\n".join(lines)
 
 def generate_report(news_text):
@@ -120,12 +126,12 @@ def generate_report(news_text):
 3. 不给买入、卖出、持有建议。
 4. 每条重要新闻必须附带原始链接。
 5. 来源仅限以下类型：
-   Reuters、Bloomberg、Financial Times、BBC、TechCrunch、36氪、虎嗅、AP News、
-   Federal Reserve、White House、Treasury、Commerce、SEC、DOJ。
+Reuters、Bloomberg、Financial Times、BBC、TechCrunch、36氪、虎嗅、AP News、
+Federal Reserve、White House、Treasury、Commerce、SEC、DOJ。
 6. 重点关注影响美股的信息：
-   美联储、FOMC、鲍威尔、美联储官员讲话、美国政府官员发言、财政部、白宫、
-   CPI、PPI、非农、失业率、GDP、PMI、ISM、美债收益率、美元、油价、AI、半导体、
-   NVDA、TSLA、MSFT、META、AAPL、AMZN、AMD、GOOGL。
+美联储、FOMC、鲍威尔、美联储官员讲话、美国政府官员发言、财政部、白宫、
+CPI、PPI、非农、失业率、GDP、PMI、ISM、美债收益率、美元、油价、AI、半导体、
+NVDA、TSLA、MSFT、META、AAPL、AMZN、AMD、GOOGL。
 7. 全文必须超过1000个中文字符。
 8. 如果新闻不足，请明确写“指定来源新闻不足”，不要编造。
 9. 语言：中文。
@@ -162,9 +168,8 @@ def generate_report(news_text):
     return response.text
 
 def send_email(report):
-    subject = "美股事实日报"
     msg = MIMEText(report, "plain", "utf-8")
-    msg["Subject"] = subject
+    msg["Subject"] = "美股事实日报"
     msg["From"] = EMAIL_USER
     msg["To"] = EMAIL_TO
 
