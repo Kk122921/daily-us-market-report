@@ -134,7 +134,8 @@ def build_news_text(news):
 
 def generate_report(news_text):
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-1.5-flash")
+
+    model = genai.GenerativeModel("gemini-2.0-flash")
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
