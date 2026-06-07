@@ -1,1 +1,183 @@
-print("Hello Market Report")
+import os
+import smtplib
+import requests
+from datetime import datetime, timezone
+from email.mime.text import MIMEText
+from urllib.parse import urlparse
+import google.generativeai as genai
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASS = os.getenv("EMAIL_PASS")
+EMAIL_TO = os.getenv("EMAIL_TO")
+
+ALLOWED_DOMAINS = [
+    "reuters.com",
+    "bloomberg.com",
+    "ft.com",
+    "bbc.com",
+    "techcrunch.com",
+    "36kr.com",
+    "huxiu.com",
+    "apnews.com",
+    "federalreserve.gov",
+    "whitehouse.gov",
+    "treasury.gov",
+    "commerce.gov",
+    "sec.gov",
+    "justice.gov"
+]
+
+KEYWORDS = """
+US stock market OR Nasdaq OR S&P 500 OR Dow Jones OR Federal Reserve OR FOMC OR Powell
+OR Treasury OR White House OR SEC OR DOJ OR Commerce Department
+OR CPI OR PPI OR jobs report OR unemployment OR GDP OR PMI OR ISM
+OR Nvidia OR Tesla OR Microsoft OR Meta OR Apple OR Amazon OR AMD OR Google OR AI chips
+OR bond yields OR dollar OR oil OR geopolitics OR sanctions OR export controls
+"""
+
+def domain_allowed(url):
+    domain = urlparse(url).netloc.lower().replace("www.", "")
+    return any(d in domain for d in ALLOWED_DOMAINS)
+
+def fetch_news():
+    query = f"({KEYWORDS})"
+    url = "https://api.gdeltproject.org/api/v2/doc/doc"
+
+    params = {
+        "query": query,
+        "mode": "ArtList",
+        "format": "json",
+        "timespan": "24h",
+        "maxrecords": 75,
+        "sort": "HybridRel"
+    }
+
+    r = requests.get(url, params=params, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+
+    articles = data.get("articles", [])
+    results = []
+    seen = set()
+
+    for a in articles:
+        title = a.get("title", "").strip()
+        link = a.get("url", "").strip()
+        source = a.get("sourceCountry", "")
+        domain = urlparse(link).netloc.lower().replace("www.", "")
+        date = a.get("seendate", "")
+
+        if not title or not link:
+            continue
+
+        if not domain_allowed(link):
+            continue
+
+        key = title.lower()[:90]
+        if key in seen:
+            continue
+        seen.add(key)
+
+        results.append({
+            "title": title,
+            "url": link,
+            "domain": domain,
+            "date": date,
+            "source": source
+        })
+
+    return results[:30]
+
+def build_news_text(news):
+    if not news:
+        return "过去24小时未从指定权威来源抓取到足够新闻。"
+
+    lines = []
+    for i, n in enumerate(news, 1):
+        lines.append(
+            f"{i}. 标题：{n['title']}\n"
+            f"来源域名：{n['domain']}\n"
+            f"时间：{n['date']}\n"
+            f"链接：{n['url']}\n"
+        )
+    return "\n".join(lines)
+
+def generate_report(news_text):
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel("gemini-1.5-flash")
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    prompt = f"""
+你是一名严格遵守事实的美股信息整理员，不是投资顾问。
+
+请根据以下过去24小时抓取到的新闻列表，生成中文《美股事实日报》。
+
+重要规则：
+1. 只基于我提供的新闻列表，不允许编造不存在的信息。
+2. 不做预测，不判断明天涨跌。
+3. 不给买入、卖出、持有建议。
+4. 每条重要新闻必须附带原始链接。
+5. 来源仅限以下类型：
+   Reuters、Bloomberg、Financial Times、BBC、TechCrunch、36氪、虎嗅、AP News、
+   Federal Reserve、White House、Treasury、Commerce、SEC、DOJ。
+6. 重点关注影响美股的信息：
+   美联储、FOMC、鲍威尔、美联储官员讲话、美国政府官员发言、财政部、白宫、
+   CPI、PPI、非农、失业率、GDP、PMI、ISM、美债收益率、美元、油价、AI、半导体、
+   NVDA、TSLA、MSFT、META、AAPL、AMZN、AMD、GOOGL。
+7. 全文必须超过1000个中文字符。
+8. 如果新闻不足，请明确写“指定来源新闻不足”，不要编造。
+9. 语言：中文。
+10. 报告必须结构清晰，适合邮件阅读。
+
+邮件结构：
+
+【美股事实日报】
+日期：{today}
+
+一、今日重点摘要
+
+二、美联储与美国政府动态
+
+三、宏观经济与美债美元
+
+四、AI、科技与半导体
+
+五、重点公司新闻
+
+六、地缘政治、监管与风险事件
+
+七、原始新闻链接汇总
+
+八、信息说明
+说明：本邮件仅用于新闻事实整理，不构成投资建议。
+
+以下是新闻列表：
+
+{news_text}
+"""
+
+    response = model.generate_content(prompt)
+    return response.text
+
+def send_email(report):
+    subject = "美股事实日报"
+    msg = MIMEText(report, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = EMAIL_USER
+    msg["To"] = EMAIL_TO
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(EMAIL_USER, EMAIL_PASS)
+        server.send_message(msg)
+
+def main():
+    news = fetch_news()
+    news_text = build_news_text(news)
+    report = generate_report(news_text)
+    send_email(report)
+    print("Daily factual market report sent successfully.")
+
+if __name__ == "__main__":
+    main()
