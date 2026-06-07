@@ -49,52 +49,75 @@ def fetch_news():
         "sort": "HybridRel"
     }
 
-    time.sleep(3)
+    try:
+        time.sleep(3)
+        r = requests.get(url, params=params, timeout=30)
 
-    r = requests.get(url, params=params, timeout=30)
+        if r.status_code == 429:
+            print("GDELT rate limited: 429")
+            return []
 
-    if r.status_code == 429:
+        if r.status_code != 200:
+            print(f"GDELT error status: {r.status_code}")
+            return []
+
+        if not r.text.strip():
+            print("GDELT returned empty response")
+            return []
+
+        try:
+            data = r.json()
+        except Exception as e:
+            print("GDELT returned non-JSON response")
+            print(str(e))
+            return []
+
+        articles = data.get("articles", [])
+        results = []
+        seen = set()
+
+        for a in articles:
+            title = a.get("title", "").strip()
+            link = a.get("url", "").strip()
+            domain = urlparse(link).netloc.lower().replace("www.", "")
+            date = a.get("seendate", "")
+
+            if not title or not link:
+                continue
+
+            if not domain_allowed(link):
+                continue
+
+            key = title.lower()[:90]
+            if key in seen:
+                continue
+
+            seen.add(key)
+
+            results.append({
+                "title": title,
+                "url": link,
+                "domain": domain,
+                "date": date
+            })
+
+        return results[:20]
+
+    except Exception as e:
+        print("fetch_news failed:")
+        print(str(e))
         return []
-
-    r.raise_for_status()
-    data = r.json()
-
-    articles = data.get("articles", [])
-    results = []
-    seen = set()
-
-    for a in articles:
-        title = a.get("title", "").strip()
-        link = a.get("url", "").strip()
-        domain = urlparse(link).netloc.lower().replace("www.", "")
-        date = a.get("seendate", "")
-
-        if not title or not link:
-            continue
-
-        if not domain_allowed(link):
-            continue
-
-        key = title.lower()[:90]
-        if key in seen:
-            continue
-
-        seen.add(key)
-
-        results.append({
-            "title": title,
-            "url": link,
-            "domain": domain,
-            "date": date
-        })
-
-    return results[:20]
 
 def build_news_text(news):
     if not news:
         return """
-过去24小时内，GDELT接口未能从指定权威来源稳定抓取到足够新闻。
-请在日报中明确说明“指定来源新闻不足”，不要编造新闻。
+过去24小时内，新闻接口未能从指定权威来源稳定抓取到足够新闻。
+
+请在日报中明确说明：
+“指定来源新闻不足，今日未能从 Reuters、Bloomberg、Financial Times、BBC、TechCrunch、36氪、虎嗅、AP News、Federal Reserve、White House、Treasury、Commerce、SEC、DOJ 等来源抓取到足够可核验新闻。”
+
+不要编造新闻。
+不要添加没有链接的新闻。
 """
 
     lines = []
