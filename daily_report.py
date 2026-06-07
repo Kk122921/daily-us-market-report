@@ -1,195 +1,141 @@
 import os
 import smtplib
-import time
 import requests
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from urllib.parse import urlparse
-import google.generativeai as genai
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
 EMAIL_TO = os.getenv("EMAIL_TO")
 
-ALLOWED_DOMAINS = [
-    "reuters.com",
-    "bloomberg.com",
-    "ft.com",
-    "bbc.com",
-    "techcrunch.com",
-    "36kr.com",
-    "huxiu.com",
-    "apnews.com",
-    "federalreserve.gov",
-    "whitehouse.gov",
-    "treasury.gov",
-    "commerce.gov",
-    "sec.gov",
-    "justice.gov"
+RSS_FEEDS = {
+    "Reuters": "https://www.reutersagency.com/feed/?best-topics=business-finance&post_type=best",
+    "BBC Business": "https://feeds.bbci.co.uk/news/business/rss.xml",
+    "BBC Technology": "https://feeds.bbci.co.uk/news/technology/rss.xml",
+    "TechCrunch": "https://techcrunch.com/feed/",
+    "AP News": "https://apnews.com/hub/business?output=rss",
+    "Federal Reserve": "https://www.federalreserve.gov/feeds/press_all.xml",
+    "White House": "https://www.whitehouse.gov/feed/",
+    "SEC": "https://www.sec.gov/news/pressreleases.rss",
+}
+
+KEYWORDS = [
+    "stock", "stocks", "nasdaq", "s&p", "dow", "market", "wall street",
+    "federal reserve", "fed", "powell", "fomc", "interest rate", "inflation",
+    "cpi", "ppi", "jobs", "employment", "treasury", "bond", "yield",
+    "dollar", "oil", "ai", "chip", "semiconductor", "nvidia", "tesla",
+    "microsoft", "meta", "apple", "amazon", "amd", "google", "alphabet",
+    "sec", "doj", "white house", "tariff", "sanction", "export control"
 ]
 
-KEYWORDS = """
-US stock market OR Nasdaq OR Federal Reserve OR Nvidia OR Tesla OR Microsoft OR AI chips
-"""
+def is_relevant(title):
+    text = title.lower()
+    return any(k.lower() in text for k in KEYWORDS)
 
-def domain_allowed(url):
-    domain = urlparse(url).netloc.lower().replace("www.", "")
-    return any(d in domain for d in ALLOWED_DOMAINS)
-
-def fetch_news():
-    url = "https://api.gdeltproject.org/api/v2/doc/doc"
-
-    params = {
-        "query": KEYWORDS,
-        "mode": "ArtList",
-        "format": "json",
-        "timespan": "24h",
-        "maxrecords": 25,
-        "sort": "HybridRel"
-    }
+def fetch_rss(source_name, feed_url):
+    articles = []
 
     try:
-        time.sleep(3)
-        r = requests.get(url, params=params, timeout=30)
-
-        if r.status_code == 429:
-            print("GDELT rate limited: 429")
-            return []
+        r = requests.get(
+            feed_url,
+            timeout=20,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
 
         if r.status_code != 200:
-            print(f"GDELT error status: {r.status_code}")
+            print(f"{source_name} RSS failed: {r.status_code}")
             return []
 
-        if not r.text.strip():
-            print("GDELT returned empty response")
-            return []
+        root = ET.fromstring(r.content)
 
-        try:
-            data = r.json()
-        except Exception as e:
-            print("GDELT returned non-JSON response")
-            print(str(e))
-            return []
-
-        articles = data.get("articles", [])
-        results = []
-        seen = set()
-
-        for a in articles:
-            title = a.get("title", "").strip()
-            link = a.get("url", "").strip()
-            domain = urlparse(link).netloc.lower().replace("www.", "")
-            date = a.get("seendate", "")
+        for item in root.findall(".//item"):
+            title = item.findtext("title", default="").strip()
+            link = item.findtext("link", default="").strip()
+            pub_date = item.findtext("pubDate", default="").strip()
 
             if not title or not link:
                 continue
 
-            if not domain_allowed(link):
+            if not is_relevant(title):
                 continue
 
-            key = title.lower()[:90]
+            articles.append({
+                "source": source_name,
+                "title": title,
+                "link": link,
+                "date": pub_date
+            })
+
+        return articles
+
+    except Exception as e:
+        print(f"{source_name} error:", str(e))
+        return []
+
+def collect_news():
+    all_articles = []
+    seen = set()
+
+    for source, url in RSS_FEEDS.items():
+        articles = fetch_rss(source, url)
+
+        for article in articles:
+            key = article["title"].lower()[:100]
+
             if key in seen:
                 continue
 
             seen.add(key)
+            all_articles.append(article)
 
-            results.append({
-                "title": title,
-                "url": link,
-                "domain": domain,
-                "date": date
-            })
+    return all_articles[:30]
 
-        return results[:20]
-
-    except Exception as e:
-        print("fetch_news failed:")
-        print(str(e))
-        return []
-
-def build_news_text(news):
-    if not news:
-        return """
-过去24小时内，新闻接口未能从指定权威来源稳定抓取到足够新闻。
-
-请在日报中明确说明：
-“指定来源新闻不足，今日未能从 Reuters、Bloomberg、Financial Times、BBC、TechCrunch、36氪、虎嗅、AP News、Federal Reserve、White House、Treasury、Commerce、SEC、DOJ 等来源抓取到足够可核验新闻。”
-
-不要编造新闻。
-不要添加没有链接的新闻。
-"""
-
-    lines = []
-
-    for i, n in enumerate(news, 1):
-        lines.append(
-            f"{i}. 标题：{n['title']}\n"
-            f"来源域名：{n['domain']}\n"
-            f"时间：{n['date']}\n"
-            f"链接：{n['url']}\n"
-        )
-
-    return "\n".join(lines)
-
-def generate_report(news_text):
-    genai.configure(api_key=GEMINI_API_KEY)
-
-    model = genai.GenerativeModel("gemini-2.0-flash")
-
+def build_report(news):
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    prompt = f"""
-你是一名严格遵守事实的美股信息整理员，不是投资顾问。
+    lines = []
+    lines.append("【美股事实日报】")
+    lines.append(f"日期：{today}")
+    lines.append("")
+    lines.append("说明：本邮件只收集公开来源新闻，不做预测，不提供买卖建议。")
+    lines.append("新闻来源优先来自 Reuters、BBC、TechCrunch、AP News、Federal Reserve、White House、SEC 等权威来源。")
+    lines.append("如果某些来源当天 RSS 无可用内容，系统不会使用小网站替代，也不会编造新闻。")
+    lines.append("")
+    lines.append("一、今日新闻链接汇总")
+    lines.append("")
 
-请根据以下过去24小时抓取到的新闻列表，生成中文《美股事实日报》。
+    if not news:
+        lines.append("指定来源新闻不足。")
+        lines.append("过去24小时内未能从指定权威来源抓取到足够与美股相关的新闻。")
+        lines.append("")
+    else:
+        for i, article in enumerate(news, 1):
+            lines.append(f"{i}. {article['title']}")
+            lines.append(f"来源：{article['source']}")
+            lines.append(f"时间：{article['date']}")
+            lines.append(f"链接：{article['link']}")
+            lines.append("")
 
-重要规则：
-1. 只基于我提供的新闻列表，不允许编造不存在的信息。
-2. 不做预测，不判断明天涨跌。
-3. 不给买入、卖出、持有建议。
-4. 每条重要新闻必须附带原始链接。
-5. 来源仅限以下类型：
-Reuters、Bloomberg、Financial Times、BBC、TechCrunch、36氪、虎嗅、AP News、
-Federal Reserve、White House、Treasury、Commerce、SEC、DOJ。
-6. 重点关注影响美股的信息：
-美联储、FOMC、鲍威尔、美联储官员讲话、美国政府官员发言、财政部、白宫、
-CPI、PPI、非农、失业率、GDP、PMI、ISM、美债收益率、美元、油价、AI、半导体、
-NVDA、TSLA、MSFT、META、AAPL、AMZN、AMD、GOOGL。
-7. 全文必须超过1000个中文字符。
-8. 如果新闻不足，请明确写“指定来源新闻不足”，不要编造。
-9. 语言：中文。
-10. 报告必须结构清晰，适合邮件阅读。
+    lines.append("二、监控范围")
+    lines.append("")
+    lines.append("本系统重点监控美股、纳斯达克、标普500、道琼斯、美联储、FOMC、鲍威尔、美联储官员讲话、美国政府官员发言、财政部、白宫、SEC、DOJ、CPI、PPI、非农、失业率、GDP、PMI、ISM、美债收益率、美元、油价、AI、半导体、出口管制、地缘政治风险。")
+    lines.append("")
+    lines.append("重点公司包括：NVDA、TSLA、MSFT、META、AAPL、AMZN、AMD、GOOGL。")
+    lines.append("")
+    lines.append("三、信息说明")
+    lines.append("")
+    lines.append("本邮件仅用于新闻事实整理。")
+    lines.append("所有新闻均以原始链接为准。")
+    lines.append("本邮件不构成投资建议。")
 
-邮件结构：
+    report = "\n".join(lines)
 
-【美股事实日报】
-日期：{today}
+    if len(report) < 1000:
+        report += "\n\n补充说明：本系统采用严格来源过滤机制。若当天权威来源中与美股直接相关的新闻数量较少，邮件仍会保留来源透明原则，不使用未经验证的小网站、自媒体或二次搬运内容进行填充。"
 
-一、今日重点摘要
-
-二、美联储与美国政府动态
-
-三、宏观经济与美债美元
-
-四、AI、科技与半导体
-
-五、重点公司新闻
-
-六、地缘政治、监管与风险事件
-
-七、原始新闻链接汇总
-
-八、信息说明
-说明：本邮件仅用于新闻事实整理，不构成投资建议。
-
-以下是新闻列表：
-
-{news_text}
-"""
-
-    response = model.generate_content(prompt)
-    return response.text
+    return report
 
 def send_email(report):
     msg = MIMEText(report, "plain", "utf-8")
@@ -202,11 +148,10 @@ def send_email(report):
         server.send_message(msg)
 
 def main():
-    news = fetch_news()
-    news_text = build_news_text(news)
-    report = generate_report(news_text)
+    news = collect_news()
+    report = build_report(news)
     send_email(report)
-    print("Daily factual market report sent successfully.")
+    print("Email sent successfully.")
 
 if __name__ == "__main__":
     main()
